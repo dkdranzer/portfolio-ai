@@ -115,27 +115,85 @@ export function createNeuralScene(canvas: HTMLCanvasElement, opts: NeuralSceneOp
     }
   }
 
-  // 3 · brain (two hemispheres, folds, cerebellum, stem) — long axis on z
-  const brainSurface: THREE.Vector3[] = [];
+  // 3 · brain: faint outline + neurons joined by branching dendrites and axons
+  const BR = new THREE.Vector3(5.8, 4.7, 7.4);
+  const inside = (p: THREE.Vector3) =>
+    (p.x / (BR.x * 0.88)) ** 2 + (p.y / (BR.y * 0.88)) ** 2 + (p.z / (BR.z * 0.88)) ** 2 < 1 && p.y > -1.7;
+  const randInside = () => {
+    const p = new THREE.Vector3();
+    do p.set((rand() * 2 - 1) * BR.x, (rand() * 2 - 1) * BR.y, (rand() * 2 - 1) * BR.z); while (!inside(p));
+    return p;
+  };
+  const jitterDir = (d: THREE.Vector3, amt: number) => d.clone().add(new THREE.Vector3(gauss(), gauss(), gauss()).multiplyScalar(amt)).normalize();
+  const somas = Array.from({ length: quality === "high" ? 30 : 22 }, randInside);
+  const nerveSegs: [THREE.Vector3, THREE.Vector3][] = [];
+  const signalPaths: THREE.Vector3[][] = [];
+  const grow = (start: THREE.Vector3, dir: THREE.Vector3, depth: number, path: THREE.Vector3[]) => {
+    let p = start, d = dir;
+    const pts: THREE.Vector3[] = [];
+    const steps = 3 + Math.floor(rand() * 2);
+    for (let k = 0; k < steps; k++) {
+      d = jitterDir(d, 0.35);
+      const q = p.clone().addScaledVector(d, (0.55 + rand() * 0.4) * Math.pow(0.82, depth));
+      if (!inside(q)) break;
+      nerveSegs.push([p, q]);
+      pts.push(q);
+      p = q;
+    }
+    const full = path.concat(pts);
+    if (depth < 3 && pts.length) {
+      const n = rand() < 0.65 ? 2 : 1;
+      for (let k = 0; k < n; k++) grow(p, jitterDir(d, 0.9), depth + 1, full);
+    } else if (full.length > 3 && rand() < 0.3) {
+      signalPaths.push(full.slice().reverse()); // tip → cell body
+    }
+  };
+  for (const soma of somas) {
+    const n = 4 + Math.floor(rand() * 3);
+    for (let k = 0; k < n; k++) grow(soma, new THREE.Vector3(gauss(), gauss(), gauss()).normalize(), 0, [soma]);
+  }
+  // axons: wavy fibres from each cell body to its two nearest neighbours
+  somas.forEach((a, ai) => {
+    const near = somas.map((b, bi) => ({ b, bi, d: a.distanceTo(b) })).filter((x) => x.bi !== ai).sort((x, y) => x.d - y.d).slice(0, 2);
+    for (const { b } of near) {
+      const axis = b.clone().sub(a);
+      const side = new THREE.Vector3().crossVectors(axis, new THREE.Vector3(gauss(), gauss(), gauss())).normalize();
+      const pts: THREE.Vector3[] = [a];
+      const segs = 8;
+      for (let k = 1; k < segs; k++) {
+        const t = k / segs;
+        pts.push(a.clone().lerp(b, t).addScaledVector(side, Math.sin(t * Math.PI) * axis.length() * 0.18 + gauss() * 0.08));
+      }
+      pts.push(b);
+      for (let k = 0; k < pts.length - 1; k++) nerveSegs.push([pts[k], pts[k + 1]]);
+      signalPaths.push(pts, pts.slice().reverse());
+    }
+  });
+  // place the particles: outline, cell bodies, then along every fibre (weighted by length)
+  const segCum: number[] = [];
+  let segTotal = 0;
+  for (const [p, q] of nerveSegs) { segTotal += p.distanceTo(q); segCum.push(segTotal); }
+  const pickSeg = () => {
+    const r = rand() * segTotal;
+    let lo = 0, hi = segCum.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (segCum[m] < r) lo = m + 1; else hi = m; }
+    return nerveSegs[lo];
+  };
   for (let i = 0; i < N; i++) {
     const r0 = rand();
     let p: THREE.Vector3;
-    if (r0 < 0.07) {
-      const t = rand();
-      const a = rand() * Math.PI * 2, rr = 0.8 * Math.sqrt(rand());
-      p = new THREE.Vector3(Math.cos(a) * rr, -2.6 - t * 3.6, -1.6 - t * 1.4 + Math.sin(a) * rr);
-    } else if (r0 < 0.16) {
+    if (r0 < 0.3) {
       const d = new THREE.Vector3(gauss(), gauss(), gauss()).normalize();
-      p = new THREE.Vector3(d.x * 3.3, -2.4 + d.y * 1.5, -4.6 + d.z * 2.1);
-      p.y += Math.sin(d.z * 18) * 0.12;
-    } else {
-      const d = new THREE.Vector3(gauss(), gauss(), gauss()).normalize();
-      const fold = 1 + 0.07 * Math.sin(d.y * 15 + d.z * 7) * Math.sin(d.z * 13 - d.x * 5);
-      const depth = 0.82 + 0.18 * Math.sqrt(rand());
-      const s = d.x >= 0 ? 1 : -1;
-      p = new THREE.Vector3(d.x * 5.8 * fold * depth + s * 0.4, d.y * 4.7 * fold * depth, d.z * 7.4 * fold * depth);
+      const fold = 1 + 0.06 * Math.sin(d.y * 15 + d.z * 7) * Math.sin(d.z * 13 - d.x * 5);
+      const sgn = d.x >= 0 ? 1 : -1;
+      p = new THREE.Vector3(d.x * BR.x * fold + sgn * 0.4, d.y * BR.y * fold, d.z * BR.z * fold);
       if (p.y < -1.9) p.y = -1.9 + (p.y + 1.9) * 0.35;
-      if (depth > 0.97 && brainSurface.length < 4000) brainSurface.push(p.clone());
+    } else if (r0 < 0.37) {
+      const c = somas[Math.floor(rand() * somas.length)];
+      p = c.clone().add(new THREE.Vector3(gauss(), gauss(), gauss()).multiplyScalar(0.16));
+    } else {
+      const [a, b] = pickSeg();
+      p = a.clone().lerp(b, rand()).add(new THREE.Vector3(gauss(), gauss(), gauss()).multiplyScalar(0.035));
     }
     set(S.brain, i, p.x, p.y + 0.6, p.z);
   }
@@ -350,15 +408,83 @@ export function createNeuralScene(canvas: HTMLCanvasElement, opts: NeuralSceneOp
 
   const brainGroup = new THREE.Group();
   scene.add(brainGroup);
-  const synapses: [THREE.Vector3, THREE.Vector3][] = [];
-  for (let k = 0; k < (quality === "high" ? 520 : 260) && brainSurface.length > 10; k++) {
-    const a = brainSurface[Math.floor(rand() * brainSurface.length)];
-    let b = brainSurface[Math.floor(rand() * brainSurface.length)];
-    for (let t = 0; t < 30 && (b.distanceTo(a) > 4.5 || b.distanceTo(a) < 1.2); t++) b = brainSurface[Math.floor(rand() * brainSurface.length)];
-    synapses.push([a.clone().setY(a.y + 0.6), b.clone().setY(b.y + 0.6)]);
-  }
-  const brainPulses = makePulses(synapses, new THREE.Color(0.45, 0.95, 1.0), 7, 0.25, 0.55, 1.5);
-  brainGroup.add(brainPulses.pts);
+  const brainInner = new THREE.Group();
+  brainInner.position.y = 0.6;
+  brainGroup.add(brainInner);
+  const nerveGeo = new THREE.BufferGeometry().setFromPoints(nerveSegs.flatMap(([a, b]) => [a, b]));
+  const nerveMat = new THREE.LineBasicMaterial({ color: new THREE.Color(0.75, 0.42, 1.0), transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+  brainInner.add(new THREE.LineSegments(nerveGeo, nerveMat));
+  // cell bodies
+  const somaTex = (() => {
+    const c = document.createElement("canvas"); c.width = c.height = 64;
+    const g = c.getContext("2d")!;
+    const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grd.addColorStop(0, "rgba(255,255,255,1)"); grd.addColorStop(0.3, "rgba(255,150,240,0.7)"); grd.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = grd; g.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(c);
+  })();
+  const somaMat = new THREE.PointsMaterial({ map: somaTex, size: 1.4, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true });
+  brainInner.add(new THREE.Points(new THREE.BufferGeometry().setFromPoints(somas), somaMat));
+
+  // signals: short streaks of light that run along whole fibres (across many segments)
+  const pathSignals = (() => {
+    const A: number[] = [], B: number[] = [], cum: number[] = [], len: number[] = [], tot: number[] = [], off: number[] = [], spd: number[] = [], head: number[] = [];
+    for (const path of signalPaths) {
+      let total = 0;
+      const lens = path.slice(1).map((q, k) => { const l = path[k].distanceTo(q); total += l; return l; });
+      const o = rand(), sp = 2.2 + rand() * 2.2;
+      let c = 0;
+      lens.forEach((l, k) => {
+        for (const h of [0, 1]) {
+          A.push(path[k].x, path[k].y, path[k].z); B.push(path[k + 1].x, path[k + 1].y, path[k + 1].z);
+          cum.push(c); len.push(l); tot.push(total); off.push(o); spd.push(sp); head.push(h);
+        }
+        c += l;
+      });
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(A, 3));
+    g.setAttribute("aB", new THREE.Float32BufferAttribute(B, 3));
+    g.setAttribute("aCum", new THREE.Float32BufferAttribute(cum, 1));
+    g.setAttribute("aLen", new THREE.Float32BufferAttribute(len, 1));
+    g.setAttribute("aTot", new THREE.Float32BufferAttribute(tot, 1));
+    g.setAttribute("aOff", new THREE.Float32BufferAttribute(off, 1));
+    g.setAttribute("aSpeed", new THREE.Float32BufferAttribute(spd, 1));
+    g.setAttribute("aHead", new THREE.Float32BufferAttribute(head, 1));
+    g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 200);
+    const m = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: { uTime: uniforms.uTime, uOpacity: { value: 0 } },
+      vertexShader: /* glsl */ `
+        uniform float uTime;
+        attribute vec3 aB; attribute float aCum, aLen, aTot, aOff, aSpeed, aHead;
+        varying float vBright;
+        const float STREAK = 2.6;
+        void main(){
+          float cycle = aTot + STREAK + 10.0;
+          float g = mod(uTime*aSpeed + aOff*cycle, cycle);        // head position along the fibre
+          float d = aHead > 0.5 ? g : g - STREAK;                 // this vertex: head or tail
+          float local = clamp((d - aCum) / aLen, 0.0, 1.0);
+          vec3 p = mix(position, aB, local);
+          float at = aCum + local * aLen;                         // where the vertex actually sits
+          float behind = g - at;                                  // distance behind the head
+          float onSeg = step(aCum, g) * step(g - STREAK, aCum + aLen);
+          float alive = step(g, aTot + STREAK) * step(behind, STREAK) * step(-0.001, behind);
+          vBright = onSeg * alive * (1.0 - behind / STREAK);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+        }`,
+      fragmentShader: /* glsl */ `
+        uniform float uOpacity; varying float vBright;
+        void main(){
+          vec3 c = mix(vec3(0.25,0.85,1.0), vec3(0.9,1.0,1.0), vBright*vBright);
+          gl_FragColor = vec4(c * vBright * uOpacity * 7.0, vBright * uOpacity);
+        }`,
+    });
+    const lines = new THREE.LineSegments(g, m);
+    lines.frustumCulled = false;
+    return { pts: lines, mat: m };
+  })();
+  brainInner.add(pathSignals.pts);
 
   // ------------------------------------------------------------ loss landscape: descending ball + trail
   const landGroup = new THREE.Group();
@@ -467,7 +593,7 @@ export function createNeuralScene(canvas: HTMLCanvasElement, opts: NeuralSceneOp
     { pos: [0, 0, 34], fov: 55 },
     { pos: [3, 3, 23], fov: 50 },
     { pos: [5, 2, 24], fov: 50 },
-    { pos: [21, 4, 6], fov: 46 },
+    { pos: [16, 3.5, 5], fov: 46 },
     { pos: [-3, 15, 25], fov: 50 },
     { pos: [0, 3, 20], fov: 50 },
     { pos: [0, 2, 21], fov: 50 },
@@ -518,7 +644,9 @@ export function createNeuralScene(canvas: HTMLCanvasElement, opts: NeuralSceneOp
     // extras fade with their stage weight
     lineMat.opacity = w[S.network] * 0.16;
     netPulses.mat.uniforms.uOpacity.value = w[S.network];
-    brainPulses.mat.uniforms.uOpacity.value = w[S.brain];
+    pathSignals.mat.uniforms.uOpacity.value = w[S.brain];
+    nerveMat.opacity = w[S.brain] * 0.5;
+    somaMat.opacity = w[S.brain] * (0.75 + 0.25 * Math.sin(time * 2.2));
     const wl = w[S.land], wr = w[S.robot];
     landGroup.visible = wl > 0.01;
     (ball.material as THREE.MeshBasicMaterial).opacity = wl;
